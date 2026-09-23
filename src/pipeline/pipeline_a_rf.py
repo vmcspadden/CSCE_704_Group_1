@@ -13,4 +13,8 @@ def fallback_params(cfg) -> dict:
     return dict(cfg["models"]["fallback"]["random_forest"])
 
 
+def fallback_max_train_samples(cfg) -> int:
+    return cfg["models"]["fallback"]["max_train_samples"]
+
+
 train_classifier = train_rf

@@ -120,20 +120,35 @@ def byte_histogram(bytez: bytes) -> list[int]:
 
 
 def byte_entropy_histogram(bytez: bytes, step: int = 1024, window: int = 2048) -> list[int]:
+    """EMBER's windowed byte/entropy histogram, vectorized.
+
+    EMBER slides a 2048-byte window in 1024-byte steps, so every window is two
+    adjacent 1024-byte chunks: per-chunk nibble counts are computed once and
+    summed pairwise (identical result, O(n) instead of a Python loop)."""
     output = np.zeros((16, 16), dtype=np.int64)
     a = np.frombuffer(bytez, dtype=np.uint8)
     if a.shape[0] < window:
-        blocks = a[None, :] if a.size else np.zeros((0, 0), dtype=np.uint8)
-    else:
-        blocks = np.lib.stride_tricks.sliding_window_view(a, window)[::step]
-    for block in blocks:
-        c = np.bincount(block >> 4, minlength=16)
-        p = c.astype(np.float32) / window
-        wh = np.where(c)[0]
-        H = np.sum(-p[wh] * np.log2(p[wh])) * 2
-        hbin = min(int(H * 2), 15)
-        output[hbin, :] += c
+        if a.size:
+            c = np.bincount(a >> 4, minlength=16)
+            output[_entropy_bins(c[None, :], window)[0], :] += c
+        return output.flatten().tolist()
+    assert window == 2 * step
+    n_windows = (a.shape[0] - window) // step + 1
+    chunks = (a[:(n_windows + 1) * step] >> 4).reshape(n_windows + 1, step)
+    offsets = (np.arange(n_windows + 1) * 16)[:, None]
+    chunk_counts = np.bincount((chunks + offsets).ravel(), minlength=(n_windows + 1) * 16).reshape(-1, 16)
+    counts = chunk_counts[:-1] + chunk_counts[1:]
+    bins = _entropy_bins(counts, window)
+    np.add.at(output, bins, counts)
     return output.flatten().tolist()
+
+
+def _entropy_bins(counts: np.ndarray, window: int) -> np.ndarray:
+    p = counts.astype(np.float32) / window
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terms = np.where(counts > 0, -p * np.log2(p), 0.0)
+    H = terms.sum(axis=1) * 2
+    return np.minimum((H * 2).astype(np.int64), 15)
 
 
 def string_features(bytez: bytes) -> dict:

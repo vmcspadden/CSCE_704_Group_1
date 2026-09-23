@@ -53,6 +53,7 @@ def main() -> None:
     bids_tr = lsh.buckets(E_tr)
     table = BucketTable(cfg["buckets"]).fit(bids_tr, y_tr)
     logging.info("bucket table: %s", table.summary())
+    del E_tr  # only needed for bucket assignment; frees ~3 GB before model fitting
 
     df_va, E_va = load_split(cfg, "val")
     y_va = df_va["y"].to_numpy()

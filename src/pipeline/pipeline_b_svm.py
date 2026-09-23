@@ -14,4 +14,8 @@ def fallback_params(cfg) -> dict:
     return dict(cfg["models"]["linear_svm"])
 
 
+def fallback_max_train_samples(cfg) -> int:
+    return cfg["models"]["linear_svm"]["fallback_max_train_samples"]
+
+
 train_classifier = train_svm

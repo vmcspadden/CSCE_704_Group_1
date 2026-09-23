@@ -62,7 +62,7 @@ def train_cycle(pmod, cfg, X: np.ndarray, y: np.ndarray, bids: np.ndarray, table
     fb_action = decide(registry.last_trained_at(pmod.NAME, FALLBACK_KEY), True, now, cadence)
     if should_train(fb_action):
         idx = np.arange(len(y))
-        cap = cfg["models"]["fallback"]["max_train_samples"]
+        cap = pmod.fallback_max_train_samples(cfg)
         if len(idx) > cap:
             idx = np.sort(np.random.default_rng(seed + 1).choice(idx, cap, replace=False))
         t0 = time.time()

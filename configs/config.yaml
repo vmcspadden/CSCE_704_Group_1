@@ -47,19 +47,26 @@ features:
   extractor_version: "1.0.0"
 
 # --- §5 LSH pre-filter --------------------------------------------------------
+# rows_per_band (MinHash values per bucket key) was tuned on the validation
+# split: 1-2 give a few hundred very mixed buckets, 3 gives ~15k buckets with
+# ~11% of validation traffic resolved by high-purity simple regions.
 lsh:
   seed: 20240501
-  num_perm: 16
   mappings:
     structure_focused:
-      rows_per_band: 2
+      rows_per_band: 3
     content_focused:
-      rows_per_band: 2
+      rows_per_band: 3
   primary_mapping: structure_focused   # §5.2 option (a)
 
 # --- §6 bucket state ----------------------------------------------------------
+# hard_region_min_malicious_samples: the spec's default is 50. Tuned on the
+# validation split to 2000: classifiers that only ever saw a few hundred
+# malicious samples of their own bucket missed far more new malware than the
+# fallback model (82.7% vs 94.3% TPR on the same samples), while buckets with
+# >= 2000 malicious samples match or beat it.
 buckets:
-  hard_region_min_malicious_samples: 50
+  hard_region_min_malicious_samples: 2000
   hard_region_min_benign_samples: 200
   # A single-class bucket needs at least this much training support before a
   # hash lookup alone is trusted to decide it. Smaller single-class buckets are
@@ -78,11 +85,15 @@ models:
     max_features: sqrt
     class_weight: balanced_subsample
     n_jobs: -1
-  linear_svm:
-    C: 0.1
+  linear_svm:            # hinge-loss linear SVM (see src/models/baseline_svm.py)
+    alpha: 1.0e-5          # L2 strength (~ 1 / (C * n_samples)); tuned on validation
     class_weight: balanced
-    max_iter: 5000
+    max_iter: 50
+    tol: 1.0e-4
     calibration_cv: 3
+    # SGD works in float64 and calibration refits per fold; 300k x 2394 does
+    # not fit in 14 GB of RAM, so the SVM fallback uses a smaller random sample.
+    fallback_max_train_samples: 150000
   # §10.2 secondary review: model used for hard buckets without a classifier
   # and for novel buckets. Trained on the whole training split.
   fallback:
@@ -97,7 +108,7 @@ models:
 
 # --- thresholds (calibrated on the validation split only) ---------------------
 calibration:
-  target_val_fpr: 0.004        # leaves margin under the 1% FPR goal
+  target_val_fpr: 0.005        # half of the 1% FPR goal, as margin for distribution shift
   # §10.2 fail-safe: the fallback threshold is lowered by this factor relative
   # to its FPR-calibrated value (never raised), biasing it toward "malicious".
   fallback_failsafe_factor: 1.0

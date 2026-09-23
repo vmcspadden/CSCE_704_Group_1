@@ -11,9 +11,16 @@ copy-on-write). If a worker exceeds the per-request budget, or crashes on a
 malformed file, it is killed and replaced, and the request gets the
 fail-safe verdict 1 (§10.2: never fail open) - a timeout would otherwise be
 counted as an evasion.
+
+Memory: before forking, the parent runs a full GC, freezes the surviving
+objects (so the collector never writes to shared pages) and returns freed
+heap to the OS. Workers trim their heap after every request and are
+recycled once their private memory passes ``DF_WORKER_MAX_PRIVATE_MB``.
 """
 from __future__ import annotations
 
+import ctypes
+import gc
 import logging
 import multiprocessing as mp
 import os
@@ -33,6 +40,25 @@ sys.path.insert(0, str(ROOT))
 log = logging.getLogger("defender")
 _CTX = mp.get_context("fork")
 _PIPE = None  # loaded in the parent before workers fork
+_MAX_PRIVATE_KB = 200 * 1024
+
+try:
+    _LIBC = ctypes.CDLL("libc.so.6")
+except OSError:  # non-glibc platform
+    _LIBC = None
+
+
+def _malloc_trim() -> None:
+    if _LIBC is not None:
+        _LIBC.malloc_trim(0)
+
+
+def _private_kb() -> int:
+    try:
+        with open("/proc/self/smaps_rollup") as fh:
+            return sum(int(line.split()[1]) for line in fh if line.startswith(("Private_Dirty", "Private_Clean")))
+    except OSError:
+        return 0
 
 
 def _worker_loop(conn) -> None:
@@ -48,7 +74,9 @@ def _worker_loop(conn) -> None:
             result = int(_PIPE.predict(vec[None, :])[0])
         except Exception:  # noqa: BLE001 - unscoreable input -> fail-safe malicious
             result = 1
-        conn.send(result)
+        del bytez
+        _malloc_trim()
+        conn.send((result, _private_kb() > _MAX_PRIVATE_KB))
 
 
 class Worker:
@@ -80,7 +108,10 @@ class WorkerPool:
         try:
             w.conn.send_bytes(bytez)
             if w.conn.poll(max(0.0, deadline - time.monotonic())):
-                result = w.conn.recv()
+                result, recycle = w.conn.recv()
+                if recycle:           # heap grew too much; replace (fork is instant)
+                    w.kill()
+                    w = Worker()
                 self.idle.put(w)
                 return int(result), "ok"
             status = "timeout"
@@ -92,12 +123,16 @@ class WorkerPool:
 
 
 def create_app(bundle_path: str | os.PathLike, workers: int = 2, budget_seconds: float = 4.5,
-               max_bytes: int = 16 * 1024 * 1024) -> Flask:
-    global _PIPE
+               max_bytes: int = 64 * 1024 * 1024, worker_max_private_mb: int = 200) -> Flask:
+    global _PIPE, _MAX_PRIVATE_KB
+    _MAX_PRIVATE_KB = worker_max_private_mb * 1024
     _PIPE = joblib.load(bundle_path)
     # warm up LIEF / sklearn code paths in the parent so forked workers inherit them
     from src.features.pe_parser import ember_vector
     _PIPE.predict(ember_vector(b"MZ" + b"\0" * 1024)[0][None, :])
+    gc.collect()
+    gc.freeze()
+    _malloc_trim()
     pool = WorkerPool(workers)
     info = {
         "name": _PIPE.name,
@@ -146,7 +181,8 @@ def main() -> None:
     bundle = env.get("DF_BUNDLE_PATH", str(Path(__file__).resolve().parent / "model" / "bundle.joblib"))
     app = create_app(bundle, workers=int(env.get("DF_WORKERS", "2")),
                      budget_seconds=float(env.get("DF_REQUEST_BUDGET", "4.5")),
-                     max_bytes=int(env.get("DF_MAX_BYTES", str(16 * 1024 * 1024))))
+                     max_bytes=int(env.get("DF_MAX_BYTES", str(64 * 1024 * 1024))),
+                     worker_max_private_mb=int(env.get("DF_WORKER_MAX_PRIVATE_MB", "200")))
     from waitress import serve
 
     port = int(env.get("DF_PORT", "8080"))
