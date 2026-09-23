@@ -1,0 +1,8 @@
+# Training / evaluation environment (superset of requirements-docker.txt).
+-r requirements-docker.txt
+pandas==3.0.6
+pyyaml==6.0.3
+requests==2.34.2
+msgpack==1.2.2
+shap==0.51.0
+pytest==9.1.1
